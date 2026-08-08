@@ -112,17 +112,23 @@ start_udp() {
   wg-quick down "$WGCONF" >/dev/null 2>&1 || true; return 1
 }
 
+# route the server via the physical gateway so wstunnel bypasses the tunnel
+add_exclude() {
+  local srv="$1" gw="$2"
+  route -n delete -host "$srv" >/dev/null 2>&1 || true
+  [[ -n "$gw" ]] && route -n add -host "$srv" "$gw" >/dev/null 2>&1 || true
+}
+
 start_tcp() {
   local srv="$1"
   echo "escape: UDP blocked — switching to TCP-443 (HTTPS-disguised)…"
   [[ -x "$WSTUNNEL" ]] || die "wstunnel missing at $WSTUNNEL"
   wg-quick down "$WGCONF" >/dev/null 2>&1 || true
-  # exclude the server from the tunnel using the PHYSICAL gateway captured earlier
   local gw="${PHYS_GW:-}"
   [[ -z "$gw" ]] && gw=$(route -n get "$srv" 2>/dev/null | awk '/gateway:/{print $2; exit}')
-  route -n delete -host "$srv" >/dev/null 2>&1 || true
-  if [[ -n "$gw" ]]; then route -n add -host "$srv" "$gw" >/dev/null 2>&1 || true
-  else echo "escape: (warning) could not find gateway for route exclusion"; fi
+  [[ -n "$gw" ]] || { echo "escape: couldn't find your network gateway — can't route around the tunnel"; return 1; }
+  echo "escape: routing $srv directly via $gw (so the tunnel doesn't loop)"
+  add_exclude "$srv" "$gw"
   pkill -f 'wstunnel client' 2>/dev/null || true
   nohup "$WSTUNNEL" client -L "udp://$LOCALUDP:127.0.0.1:443?timeout_sec=0" \
     --tls-sni-override www.microsoft.com "wss://$srv:443" >"$LOG" 2>&1 &
@@ -130,9 +136,15 @@ start_tcp() {
   pgrep -f 'wstunnel client' >/dev/null || { echo "escape: wstunnel failed to start:"; tail -5 "$LOG"; return 1; }
   build_wg_conf "127.0.0.1:$LOCALUDP"
   wg_up || return 1
-  sleep 3
-  [[ "$(egress_ip 15)" == "$srv" ]] && return 0
-  echo "escape: tunnel up but no traffic (wstunnel log:)"; tail -3 "$LOG"
+  add_exclude "$srv" "$gw"   # re-apply: macOS wg-quick can wipe it during 'up'
+  local i
+  for i in 1 2 3 4 5; do
+    sleep 3
+    [[ "$(egress_ip 8)" == "$srv" ]] && return 0
+    add_exclude "$srv" "$gw"
+  done
+  echo "escape: tunnel up but no traffic. wstunnel log:"; tail -4 "$LOG"
+  echo "escape: route to server is:"; route -n get "$srv" 2>/dev/null | sed 's/^/    /'
   return 1
 }
 
@@ -186,16 +198,14 @@ BREW="$(run_user 'command -v brew' 2>/dev/null || true)"; [[ -n "$BREW" ]] || BR
 run_user "command -v wg-quick"     >/dev/null 2>&1 || { echo "[*] Installing wireguard-tools…"; run_user "$BREW install wireguard-tools"; }
 run_user "command -v wireguard-go" >/dev/null 2>&1 || { echo "[*] Installing wireguard-go…";    run_user "$BREW install wireguard-go"; }
 
+# wstunnel from github.io Pages (reachable where GitHub releases are blocked)
 case "$(uname -m)" in arm64) A=arm64;; *) A=amd64;; esac
 mkdir -p /etc/escape; chmod 700 /etc/escape
-tmp=$(mktemp -d)
 echo "[*] Downloading wstunnel (darwin $A)…"
-curl -fSL "https://github.com/erebe/wstunnel/releases/download/v10.6.2/wstunnel_10.6.2_darwin_${A}.tar.gz" -o "$tmp/w.tgz" || { echo "ERROR: wstunnel download failed"; exit 1; }
-tar xzf "$tmp/w.tgz" -C "$tmp" || { echo "ERROR: wstunnel extract failed"; exit 1; }
-install -m755 "$tmp/wstunnel" /etc/escape/wstunnel
+curl -fSL "https://d-deadric-c.github.io/escape/wstunnel-darwin-${A}" -o /etc/escape/wstunnel || { echo "ERROR: wstunnel download failed"; exit 1; }
+chmod 755 /etc/escape/wstunnel
 xattr -d com.apple.quarantine /etc/escape/wstunnel 2>/dev/null || true
-rm -rf "$tmp"
-[[ -x /etc/escape/wstunnel ]] || { echo "ERROR: wstunnel not installed"; exit 1; }
+[[ -s /etc/escape/wstunnel ]] || { echo "ERROR: wstunnel not installed"; exit 1; }
 
 echo
 echo "======================================"
