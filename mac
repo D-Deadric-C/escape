@@ -164,20 +164,28 @@ printf '#!/usr/bin/env bash\nexec /usr/local/bin/escape status "$@"\n' > /usr/lo
 printf '#!/usr/bin/env bash\nexec /usr/local/bin/escape stop "$@"\n'   > /usr/local/bin/escape_stop
 chmod +x /usr/local/bin/escape_start /usr/local/bin/escape_status /usr/local/bin/escape_stop
 
+# --- Homebrew ---
 if ! run_user "command -v brew" >/dev/null 2>&1; then
   echo "[*] Installing Homebrew (one-time)…"
   run_user 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 fi
 BREW="$(run_user 'command -v brew' 2>/dev/null || true)"; [[ -n "$BREW" ]] || BREW="$([[ -x /opt/homebrew/bin/brew ]] && echo /opt/homebrew/bin/brew || echo /usr/local/bin/brew)"
-run_user "command -v wg-quick" >/dev/null 2>&1 || { echo "[*] Installing wireguard-tools…"; run_user "$BREW install wireguard-tools"; }
 
+# --- WireGuard userspace: BOTH wireguard-tools AND wireguard-go (mac needs the -go backend) ---
+run_user "command -v wg-quick"     >/dev/null 2>&1 || { echo "[*] Installing wireguard-tools…"; run_user "$BREW install wireguard-tools"; }
+run_user "command -v wireguard-go" >/dev/null 2>&1 || { echo "[*] Installing wireguard-go…";    run_user "$BREW install wireguard-go"; }
+
+# --- wstunnel (fixed direct release URL — no rate-limited API) ---
 case "$(uname -m)" in arm64) A=arm64;; *) A=amd64;; esac
-URL=$(curl -s https://api.github.com/repos/erebe/wstunnel/releases/latest | grep -oE "https://[^\"]*_darwin_${A}\.tar\.gz" | head -1)
-tmp=$(mktemp -d); curl -sL "$URL" -o "$tmp/w.tgz"; tar xzf "$tmp/w.tgz" -C "$tmp"
 mkdir -p /etc/escape; chmod 700 /etc/escape
+tmp=$(mktemp -d)
+echo "[*] Downloading wstunnel (darwin $A)…"
+curl -fSL "https://github.com/erebe/wstunnel/releases/download/v10.6.2/wstunnel_10.6.2_darwin_${A}.tar.gz" -o "$tmp/w.tgz" || { echo "ERROR: wstunnel download failed"; exit 1; }
+tar xzf "$tmp/w.tgz" -C "$tmp" || { echo "ERROR: wstunnel extract failed"; exit 1; }
 install -m755 "$tmp/wstunnel" /etc/escape/wstunnel
 xattr -d com.apple.quarantine /etc/escape/wstunnel 2>/dev/null || true
 rm -rf "$tmp"
+[[ -x /etc/escape/wstunnel ]] || { echo "ERROR: wstunnel not installed"; exit 1; }
 
 echo
 echo "======================================"
