@@ -117,7 +117,6 @@ start_tcp() {
 }
 
 cmd_start() {
-  need_root "$@"
   command -v wg-quick >/dev/null || die "wireguard-tools not installed (brew install wireguard-tools)"
   [[ -f "$CONF" ]] || enroll
   local srv sport; srv=$(server_ip); sport=$(server_port)
@@ -128,7 +127,7 @@ cmd_start() {
   echo "escape: could not establish a tunnel here — rolled back, internet unaffected."; teardown; exit 2
 }
 
-cmd_stop()   { need_root "$@"; teardown; echo "escape: disconnected — back on the normal network."; }
+cmd_stop()   { teardown; echo "escape: disconnected — back on the normal network."; }
 cmd_status() {   # no sudo needed: just compare the public IP
   local e; e=$(egress_ip 8)
   if [[ -n "$e" && "$e" == "$SERVER_IP" ]]; then
@@ -138,6 +137,11 @@ cmd_status() {   # no sudo needed: just compare the public IP
     echo "escape: down  (public IP: ${e:-unknown})"
   fi
 }
+
+# elevate for network-changing commands, preserving the subcommand (fixes self-sudo dropping it)
+if [[ "${1:-}" == "start" || "${1:-}" == "stop" ]] && [[ $EUID -ne 0 ]]; then
+  exec sudo "$0" "$@"
+fi
 
 case "${1:-}" in
   start)  shift; cmd_start "$@";;
