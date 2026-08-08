@@ -29,7 +29,9 @@ ENROLL_SECRET="c08dc6a5b168ed6f9e2a3dd086ec65752b87ab932d062e64"
 
 die() { echo "escape: $*" >&2; exit 1; }
 need_root() { [[ $EUID -eq 0 ]] || exec sudo "$0" "$@"; }
-egress_ip() { curl -s --max-time "${1:-12}" https://checkip.amazonaws.com 2>/dev/null || true; }
+egress_ip() {   # DNS-independent: talk to 1.1.1.1 by IP, read back our public IP
+  curl -s --max-time "${1:-12}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p'
+}
 server_ip()  { awk -F'[ :]+' '/^Endpoint/{print $3; exit}' "$CONF"; }
 server_port(){ awk -F'[ :]+' '/^Endpoint/{print $4; exit}' "$CONF"; }
 # portable JSON string-field extractor (BSD/GNU sed)
@@ -102,8 +104,12 @@ start_tcp() {
   local srv="$1"
   echo "escape: UDP blocked — switching to TCP-443 (HTTPS-disguised)…"
   [[ -x "$WSTUNNEL" ]] || die "wstunnel missing at $WSTUNNEL"
-  local gw; gw=$(route -n get "$srv" 2>/dev/null | awk '/gateway:/{print $2; exit}')
-  [[ -n "$gw" ]] && route -n add -host "$srv" "$gw" >/dev/null 2>&1 || true
+  # exclude the server from the tunnel using the PHYSICAL gateway captured earlier
+  local gw="${PHYS_GW:-}"
+  [[ -z "$gw" ]] && gw=$(route -n get "$srv" 2>/dev/null | awk '/gateway:/{print $2; exit}')
+  route -n delete -host "$srv" 2>/dev/null || true
+  if [[ -n "$gw" ]]; then route -n add -host "$srv" "$gw" >/dev/null 2>&1 || true
+  else echo "escape: (warning) could not find gateway for route exclusion"; fi
   pkill -f 'wstunnel client' 2>/dev/null || true
   nohup "$WSTUNNEL" client -L "udp://$LOCALUDP:127.0.0.1:443?timeout_sec=0" \
     --tls-sni-override www.microsoft.com "wss://$srv:443" >"$LOG" 2>&1 &
@@ -122,6 +128,8 @@ cmd_start() {
   local srv sport; srv=$(server_ip); sport=$(server_port)
   [[ -n "$srv" ]] || die "could not read server from $CONF"
   teardown
+  # capture the physical default gateway now (before any tunnel changes routing)
+  PHYS_GW=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
   start_udp "$srv" "$sport" && { echo "escape: connected ✅ (UDP)  your public IP is now $srv"; exit 0; }
   start_tcp "$srv"          && { echo "escape: connected ✅ (TCP-443)  your public IP is now $srv"; exit 0; }
   echo "escape: could not establish a tunnel here — rolled back, internet unaffected."; teardown; exit 2
@@ -175,10 +183,5 @@ echo
 echo "======================================"
 echo "  ✅  escape — installation complete!"
 echo "======================================"
-echo "  You now have 3 commands:"
-echo "     escape_start     →  connect"
-echo "     escape_status    →  check connection"
-echo "     escape_stop      →  disconnect"
-echo
-echo "  Get online now with:   escape_start"
+echo "  connect:  escape_start     check: escape_status     stop: escape_stop"
 echo
