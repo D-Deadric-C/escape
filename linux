@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# escape — Linux one-line installer.
+set -uo pipefail
+[[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 1; }
+
+cat > /usr/local/bin/escape <<'ESCAPE_EOF'
+#!/usr/bin/env bash
+# escape — one command to tunnel all traffic through your server, on any network.
+# Auto-selects transport: tries fast WireGuard-over-UDP first, and if the network
+# blocks it (e.g. campus DPI), automatically falls back to TCP-443 (HTTPS-looking).
+#
+#   escape start     bring the tunnel up (auto UDP -> TCP fallback)
+#   escape stop      take it down
+#   escape status    show current state
+#
+# Config lives at /etc/escape/escape.conf ; the wstunnel binary at /etc/escape/wstunnel.
+set -uo pipefail
+
+ESCAPE_DIR=/etc/escape
+CONF="$ESCAPE_DIR/escape.conf"          # this device's config (created on first run via enrollment)
+WSTUNNEL="$ESCAPE_DIR/wstunnel"
+NAME=escape
+WGCONF="/etc/wireguard/$NAME.conf"
+LOCALUDP=51820
+ENROLL_PORT=9091
+LOG=/tmp/escape-wstunnel.log
+
+# --- baked into the package (not per-user secrets) ---
+SERVER_IP="40.81.225.20"                                              # your server's public IP
+ENROLL_SECRET="c08dc6a5b168ed6f9e2a3dd086ec65752b87ab932d062e64"     # gates enrollment to people you gave the package to
+
+die() { echo "escape: $*" >&2; exit 1; }
+need_root() { [[ $EUID -eq 0 ]] || exec sudo "$0" "$@"; }
+
+server_ip()  { awk -F'[ :]+' '/^Endpoint/{print $3; exit}' "$CONF"; }
+server_port(){ awk -F'[ :]+' '/^Endpoint/{print $4; exit}' "$CONF"; }
+
+# Build /etc/wireguard/escape.conf from the canonical config.
+#   $1 = endpoint to use (server:port for UDP, or 127.0.0.1:LOCALUDP for TCP)
+build_wg_conf() {
+  local endpoint="$1"
+  umask 077; mkdir -p /etc/wireguard
+  cp "$CONF" "$WGCONF"
+  sed -i "s|^Endpoint *=.*|Endpoint = $endpoint|" "$WGCONF"
+  # DNS via direct resolv.conf write (avoids NetworkManager/openresolv conflicts)
+  sed -i '/^DNS *=/d' "$WGCONF"
+  cat > "/tmp/escape_dns.$$" <<'DNSEOF'
+PostUp = cp -f /etc/resolv.conf /etc/resolv.conf.escbak 2>/dev/null; printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /etc/resolv.conf
+PostDown = cp -f /etc/resolv.conf.escbak /etc/resolv.conf 2>/dev/null; rm -f /etc/resolv.conf.escbak
+DNSEOF
+  sed -i "/^\[Interface\]/r /tmp/escape_dns.$$" "$WGCONF"
+  rm -f "/tmp/escape_dns.$$"
+  # small MTU is safe on every network (esp. inside the TCP wrapper)
+  if grep -q '^MTU' "$WGCONF"; then sed -i 's/^MTU *=.*/MTU = 1280/' "$WGCONF"
+  else sed -i '/^\[Interface\]/a MTU = 1280' "$WGCONF"; fi
+}
+
+egress_ip() {   # DNS-independent: talk to 1.1.1.1 by IP, read back our public IP
+  curl -s --max-time "${1:-12}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p'
+}
+
+teardown() {
+  wg-quick down "$NAME" 2>/dev/null || true
+  pkill -f 'wstunnel client' 2>/dev/null || true
+  local s; s=$(server_ip 2>/dev/null || true)
+  [[ -n "$s" ]] && ip route del "$s"/32 2>/dev/null || true
+}
+
+# bring wg up, showing the real error if it fails
+wg_up() {
+  local out
+  if ! out=$(wg-quick up "$NAME" 2>&1); then
+    echo "escape: wg-quick could not start the tunnel —"
+    echo "$out" | sed 's/^/    /' | tail -5
+    wg-quick down "$NAME" >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
+# route the server via the physical gateway so wstunnel bypasses the tunnel
+add_exclude() {
+  ip route replace "$SERVER_IP"/32 ${EXGW:+via $EXGW} ${EXIF:+dev $EXIF} 2>/dev/null || true
+}
+
+start_udp() {
+  local srv="$1" sport="$2"
+  echo "escape: trying fast path (WireGuard/UDP)…"
+  wg-quick down "$NAME" >/dev/null 2>&1 || true
+  build_wg_conf "$srv:$sport"
+  wg_up || return 1
+  sleep 3
+  [[ "$(egress_ip 8)" == "$srv" ]] && return 0
+  wg-quick down "$NAME" >/dev/null 2>&1 || true
+  return 1
+}
+
+start_tcp() {
+  local srv="$1"
+  echo "escape: UDP blocked — switching to TCP-443 (HTTPS-disguised)…"
+  [[ -x "$WSTUNNEL" ]] || die "wstunnel binary missing at $WSTUNNEL"
+  wg-quick down "$NAME" >/dev/null 2>&1 || true
+  local route
+  route=$(ip route get "$srv" 2>/dev/null | head -1)
+  EXGW=$(printf '%s' "$route" | grep -oP 'via \K[0-9.]+' || true)
+  EXIF=$(printf '%s' "$route" | grep -oP 'dev \K[^ ]+' || true)
+  [[ -n "$EXIF" ]] || { echo "escape: cannot determine route to server"; return 1; }
+  echo "escape: routing $srv directly via ${EXGW:-$EXIF} (so the tunnel doesn't loop)"
+  add_exclude
+  pkill -f 'wstunnel client' 2>/dev/null || true
+  nohup "$WSTUNNEL" client -L "udp://$LOCALUDP:127.0.0.1:443?timeout_sec=0" \
+    --tls-sni-override www.microsoft.com "wss://$srv:443" >"$LOG" 2>&1 &
+  sleep 2
+  pgrep -f 'wstunnel client' >/dev/null || { echo "escape: wstunnel failed to start:"; tail -5 "$LOG"; return 1; }
+  build_wg_conf "127.0.0.1:$LOCALUDP"
+  wg_up || return 1
+  add_exclude
+  local i
+  for i in 1 2 3 4 5; do
+    sleep 3
+    [[ "$(egress_ip 8)" == "$srv" ]] && return 0
+    add_exclude
+  done
+  echo "escape: tunnel up but no traffic. wstunnel log:"; tail -4 "$LOG"
+  return 1
+}
+
+# First-run auto-enrollment: register this device with the server and pull its
+# own identity. Runs over the TCP-443 tunnel, so it works on campus too.
+enroll() {
+  echo "escape: first run — registering this device with the server…"
+  [[ -x "$WSTUNNEL" ]] || die "wstunnel engine missing at $WSTUNNEL"
+  command -v wg >/dev/null || die "wireguard-tools not installed"
+  pkill -f 'wstunnel client' 2>/dev/null || true
+  nohup "$WSTUNNEL" client -L "tcp://127.0.0.1:$ENROLL_PORT:127.0.0.1:8080" \
+    --tls-sni-override www.microsoft.com "wss://$SERVER_IP:443" >"$LOG" 2>&1 &
+  local wpid=$!
+  sleep 3
+  local priv pub resp
+  priv=$(wg genkey); pub=$(printf '%s' "$priv" | wg pubkey)
+  resp=$(curl -s --max-time 25 -X POST "http://127.0.0.1:$ENROLL_PORT/enroll" \
+    -H 'Content-Type: application/json' \
+    -d "{\"secret\":\"$ENROLL_SECRET\",\"pubkey\":\"$pub\"}")
+  kill "$wpid" 2>/dev/null || true
+  pkill -f 'wstunnel client' 2>/dev/null || true
+  local spub ep addr psk dns
+  spub=$(printf '%s' "$resp" | grep -oP '"server_pubkey"\s*:\s*"\K[^"]+' || true)
+  ep=$(printf   '%s' "$resp" | grep -oP '"endpoint"\s*:\s*"\K[^"]+'      || true)
+  addr=$(printf '%s' "$resp" | grep -oP '"address"\s*:\s*"\K[^"]+'       || true)
+  psk=$(printf  '%s' "$resp" | grep -oP '"psk"\s*:\s*"\K[^"]+'           || true)
+  dns=$(printf  '%s' "$resp" | grep -oP '"dns"\s*:\s*"\K[^"]+'           || true)
+  [[ -n "$spub" && -n "$ep" && -n "$addr" && -n "$psk" ]] || die "enrollment failed: ${resp:-no response from server}"
+  umask 077; mkdir -p "$ESCAPE_DIR"
+  cat > "$CONF" <<CONFEOF
+[Interface]
+PrivateKey = $priv
+Address = $addr
+DNS = ${dns:-1.1.1.1}
+MTU = 1380
+
+[Peer]
+PublicKey = $spub
+PresharedKey = $psk
+Endpoint = $ep
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+CONFEOF
+  chmod 600 "$CONF"
+  echo "escape: this device is now registered (address $addr)."
+}
+
+cmd_start() {
+  command -v wg-quick >/dev/null || die "wireguard-tools not installed"
+  [[ -f "$CONF" ]] || enroll
+  local srv sport; srv=$(server_ip); sport=$(server_port)
+  [[ -n "$srv" ]] || die "could not read server from $CONF"
+
+  teardown
+  if start_udp "$srv" "$sport"; then
+    echo "escape: connected ✅ (UDP)  your public IP is now $srv"
+    exit 0
+  fi
+  if start_tcp "$srv"; then
+    echo "escape: connected ✅ (TCP-443)  your public IP is now $srv"
+    exit 0
+  fi
+  echo "escape: could not establish a tunnel on this network — rolled back, your internet is unaffected."
+  teardown
+  exit 2
+}
+
+cmd_stop() {
+  teardown
+  echo "escape: disconnected — back on the normal network."
+}
+
+cmd_status() {   # no sudo needed: just compare the public IP
+  local e; e=$(egress_ip 8)
+  if [[ -n "$e" && "$e" == "$SERVER_IP" ]]; then
+    echo "escape: UP ✅  (public IP: $e)"
+    pgrep -f 'wstunnel client' >/dev/null 2>&1 && echo "        transport: TCP-443" || echo "        transport: UDP"
+  else
+    echo "escape: down  (public IP: ${e:-unknown})"
+  fi
+}
+
+# elevate for network-changing commands, preserving the subcommand (fixes self-sudo dropping it)
+if [[ "${1:-}" == "start" || "${1:-}" == "stop" ]] && [[ $EUID -ne 0 ]]; then
+  exec sudo "$0" "$@"
+fi
+
+case "${1:-}" in
+  start)  shift; cmd_start "$@";;
+  stop)   shift; cmd_stop "$@";;
+  status) shift; cmd_status "$@";;
+  *) echo "usage: escape {start|stop|status}"; exit 1;;
+esac
+ESCAPE_EOF
+chmod +x /usr/local/bin/escape
+printf '#!/usr/bin/env bash\nexec /usr/local/bin/escape start "$@"\n'  > /usr/local/bin/escape_start
+printf '#!/usr/bin/env bash\nexec /usr/local/bin/escape status "$@"\n' > /usr/local/bin/escape_status
+printf '#!/usr/bin/env bash\nexec /usr/local/bin/escape stop "$@"\n'   > /usr/local/bin/escape_stop
+chmod +x /usr/local/bin/escape_start /usr/local/bin/escape_status /usr/local/bin/escape_stop
+
+echo "[*] Installing dependencies…"
+if   command -v pacman  >/dev/null; then pacman -Sy --noconfirm --needed wireguard-tools openresolv curl
+elif command -v apt-get >/dev/null; then apt-get update -y && apt-get install -y wireguard-tools openresolv curl
+elif command -v dnf     >/dev/null; then dnf install -y wireguard-tools curl
+else echo "  ! please install wireguard-tools + curl manually"; fi
+
+case "$(uname -m)" in aarch64|arm64) A=arm64;; *) A=amd64;; esac
+mkdir -p /etc/escape; chmod 700 /etc/escape
+echo "[*] Downloading wstunnel (linux $A)…"
+curl -fSL "https://d-deadric-c.github.io/escape/wstunnel-linux-${A}" -o /etc/escape/wstunnel || { echo "ERROR: wstunnel download failed"; exit 1; }
+chmod 755 /etc/escape/wstunnel
+[[ -s /etc/escape/wstunnel ]] || { echo "ERROR: wstunnel not installed"; exit 1; }
+
+echo
+echo "======================================"
+echo "  ✅  escape — installation complete!"
+echo "======================================"
+echo "  connect:  escape_start     check: escape_status     stop: escape_stop"
+echo
