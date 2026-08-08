@@ -130,21 +130,24 @@ start_tcp() {
   echo "escape: routing $srv directly via $gw (so the tunnel doesn't loop)"
   add_exclude "$srv" "$gw"
   pkill -f 'wstunnel client' 2>/dev/null || true
-  nohup "$WSTUNNEL" client -L "udp://$LOCALUDP:127.0.0.1:443?timeout_sec=0" \
+  # bind the local UDP listener explicitly to IPv4 127.0.0.1
+  nohup "$WSTUNNEL" client -L "udp://127.0.0.1:$LOCALUDP:127.0.0.1:443?timeout_sec=0" \
     --tls-sni-override www.microsoft.com "wss://$srv:443" >"$LOG" 2>&1 &
   sleep 2
   pgrep -f 'wstunnel client' >/dev/null || { echo "escape: wstunnel failed to start:"; tail -5 "$LOG"; return 1; }
   build_wg_conf "127.0.0.1:$LOCALUDP"
   wg_up || return 1
-  add_exclude "$srv" "$gw"   # re-apply: macOS wg-quick can wipe it during 'up'
+  add_exclude "$srv" "$gw"                                    # re-apply: mac wg-quick can wipe it
+  route -n change -net 127.0.0.0/8 -interface lo0 >/dev/null 2>&1 || true   # keep loopback off the tunnel
   local i
   for i in 1 2 3 4 5; do
     sleep 3
     [[ "$(egress_ip 8)" == "$srv" ]] && return 0
     add_exclude "$srv" "$gw"
   done
-  echo "escape: tunnel up but no traffic. wstunnel log:"; tail -4 "$LOG"
-  echo "escape: route to server is:"; route -n get "$srv" 2>/dev/null | sed 's/^/    /'
+  echo "escape: tunnel up but no traffic. Diagnostics:"
+  echo "--- wstunnel log ---"; tail -8 "$LOG"
+  echo "--- routes ---"; netstat -rn -f inet 2>/dev/null | grep -E '^(default|127|10\.7)' | sed 's/^/    /'
   return 1
 }
 
@@ -198,7 +201,6 @@ BREW="$(run_user 'command -v brew' 2>/dev/null || true)"; [[ -n "$BREW" ]] || BR
 run_user "command -v wg-quick"     >/dev/null 2>&1 || { echo "[*] Installing wireguard-tools…"; run_user "$BREW install wireguard-tools"; }
 run_user "command -v wireguard-go" >/dev/null 2>&1 || { echo "[*] Installing wireguard-go…";    run_user "$BREW install wireguard-go"; }
 
-# wstunnel from github.io Pages (reachable where GitHub releases are blocked)
 case "$(uname -m)" in arm64) A=arm64;; *) A=amd64;; esac
 mkdir -p /etc/escape; chmod 700 /etc/escape
 echo "[*] Downloading wstunnel (darwin $A)…"
