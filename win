@@ -1,0 +1,44 @@
+# escape - Windows one-line installer.
+#   Run in an ADMIN PowerShell:
+#   irm https://d-deadric-c.github.io/escape/win | iex
+$ErrorActionPreference = "Stop"
+function IsAdmin { (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+if (-not (IsAdmin)) { Write-Host "Please run this in an ADMINISTRATOR PowerShell, then paste the command again."; return }
+
+$Dir = "$env:ProgramData\escape"
+New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+
+if (-not (Test-Path "$env:ProgramFiles\WireGuard\wireguard.exe")) {
+  Write-Host "[*] Installing WireGuard for Windows..."
+  winget install -e --id WireGuard.WireGuard --accept-source-agreements --accept-package-agreements | Out-Null
+}
+
+Write-Host "[*] Downloading escape + wstunnel..."
+Invoke-WebRequest "https://d-deadric-c.github.io/escape/escape.ps1"                 -OutFile "$Dir\escape.ps1"
+Invoke-WebRequest "https://d-deadric-c.github.io/escape/wstunnel-windows-amd64.exe" -OutFile "$Dir\wstunnel.exe"
+
+@'
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ProgramData%\escape\escape.ps1" start %*
+'@ | Set-Content "$Dir\escape_start.cmd" -Encoding Ascii
+@'
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ProgramData%\escape\escape.ps1" status %*
+'@ | Set-Content "$Dir\escape_status.cmd" -Encoding Ascii
+@'
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ProgramData%\escape\escape.ps1" stop %*
+'@ | Set-Content "$Dir\escape_stop.cmd" -Encoding Ascii
+
+$path = [Environment]::GetEnvironmentVariable("Path", "Machine")
+if ($path -notlike "*$Dir*") { [Environment]::SetEnvironmentVariable("Path", "$path;$Dir", "Machine") }
+
+Write-Host ""
+Write-Host "======================================"
+Write-Host "  escape - installation complete!"
+Write-Host "======================================"
+Write-Host "  Open a NEW Administrator PowerShell, then:"
+Write-Host "     escape_start     - connect"
+Write-Host "     escape_status    - check connection"
+Write-Host "     escape_stop      - disconnect"
+Write-Host ""
