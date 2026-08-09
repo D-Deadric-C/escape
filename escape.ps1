@@ -2,7 +2,8 @@
 # Auto-selects transport (UDP -> TCP-443) and auto-enrolls on first run.
 # Run in an ADMIN PowerShell:  escape_start | escape_status | escape_stop
 param([Parameter(Position=0)][string]$Cmd = "help")
-$ErrorActionPreference = "Stop"
+# Continue (not Stop): wireguard.exe/route write harmless text to stderr; we check results explicitly.
+$ErrorActionPreference = "Continue"
 
 $Dir      = "$env:ProgramData\escape"
 $Conf     = "$Dir\escape.conf"
