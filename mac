@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# escape — macOS one-line installer.
+# escape — mac one-line installer.
 set -uo pipefail
 [[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 1; }
 REAL_USER="${SUDO_USER:-$USER}"
 run_user(){ sudo -u "$REAL_USER" bash -lc "$*"; }
-
 cat > /usr/local/bin/escape <<'ESCAPE_EOF'
 #!/usr/bin/env bash
 # escape (macOS) — one command to tunnel all traffic through your server, on any network.
@@ -213,18 +212,16 @@ fi
 BREW="$(run_user 'command -v brew' 2>/dev/null || true)"; [[ -n "$BREW" ]] || BREW="$([[ -x /opt/homebrew/bin/brew ]] && echo /opt/homebrew/bin/brew || echo /usr/local/bin/brew)"
 run_user "command -v wg-quick"     >/dev/null 2>&1 || { echo "[*] Installing wireguard-tools…"; run_user "$BREW install wireguard-tools"; }
 run_user "command -v wireguard-go" >/dev/null 2>&1 || { echo "[*] Installing wireguard-go…";    run_user "$BREW install wireguard-go"; }
-
 case "$(uname -m)" in arm64) A=arm64;; *) A=amd64;; esac
 mkdir -p /etc/escape; chmod 700 /etc/escape
 echo "[*] Downloading wstunnel (darwin $A)…"
 curl -fSL "https://d-deadric-c.github.io/escape/wstunnel-darwin-${A}" -o /etc/escape/wstunnel || { echo "ERROR: wstunnel download failed"; exit 1; }
-chmod 755 /etc/escape/wstunnel
-xattr -d com.apple.quarantine /etc/escape/wstunnel 2>/dev/null || true
+chmod 755 /etc/escape/wstunnel; xattr -d com.apple.quarantine /etc/escape/wstunnel 2>/dev/null || true
 [[ -s /etc/escape/wstunnel ]] || { echo "ERROR: wstunnel not installed"; exit 1; }
 
 echo
-echo "======================================"
-echo "  ✅  escape — installation complete!"
-echo "======================================"
-echo "  connect:  escape_start     check: escape_status     stop: escape_stop"
+echo "escape installed — connecting now…"
 echo
+/usr/local/bin/escape start
+echo
+echo "Reconnect later:  sudo escape_start     (disconnect: sudo escape_stop)"

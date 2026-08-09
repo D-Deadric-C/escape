@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# escape — Linux one-line installer.
+# escape — linux one-line installer.
 set -uo pipefail
 [[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 1; }
-
 cat > /usr/local/bin/escape <<'ESCAPE_EOF'
 #!/usr/bin/env bash
 # escape — one command to tunnel all traffic through your server, on any network.
@@ -225,8 +224,7 @@ echo "[*] Installing dependencies…"
 if   command -v pacman  >/dev/null; then pacman -Sy --noconfirm --needed wireguard-tools openresolv curl
 elif command -v apt-get >/dev/null; then apt-get update -y && apt-get install -y wireguard-tools openresolv curl
 elif command -v dnf     >/dev/null; then dnf install -y wireguard-tools curl
-else echo "  ! please install wireguard-tools + curl manually"; fi
-
+else echo "  ! install wireguard-tools + curl manually"; fi
 case "$(uname -m)" in aarch64|arm64) A=arm64;; *) A=amd64;; esac
 mkdir -p /etc/escape; chmod 700 /etc/escape
 echo "[*] Downloading wstunnel (linux $A)…"
@@ -235,8 +233,8 @@ chmod 755 /etc/escape/wstunnel
 [[ -s /etc/escape/wstunnel ]] || { echo "ERROR: wstunnel not installed"; exit 1; }
 
 echo
-echo "======================================"
-echo "  ✅  escape — installation complete!"
-echo "======================================"
-echo "  connect:  escape_start     check: escape_status     stop: escape_stop"
+echo "escape installed — connecting now…"
 echo
+/usr/local/bin/escape start
+echo
+echo "Reconnect later:  sudo escape_start     (disconnect: sudo escape_stop)"

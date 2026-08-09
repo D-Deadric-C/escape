@@ -34,11 +34,9 @@ $path = [Environment]::GetEnvironmentVariable("Path", "Machine")
 if ($path -notlike "*$Dir*") { [Environment]::SetEnvironmentVariable("Path", "$path;$Dir", "Machine") }
 
 Write-Host ""
-Write-Host "======================================"
-Write-Host "  escape - installation complete!"
-Write-Host "======================================"
-Write-Host "  Open a NEW Administrator PowerShell, then:"
-Write-Host "     escape_start     - connect"
-Write-Host "     escape_status    - check connection"
-Write-Host "     escape_stop      - disconnect"
+Write-Host "[*] Connecting..."
 Write-Host ""
+# connect right now, in this same command (no PATH/second-step needed)
+& "$Dir\escape.ps1" start
+Write-Host ""
+Write-Host "To disconnect / reconnect later (open an Admin PowerShell):  escape_stop  /  escape_start"
