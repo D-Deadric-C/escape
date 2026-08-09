@@ -162,8 +162,19 @@ CONFEOF
   echo "escape: this device is now registered (address $addr)."
 }
 
+# fetch the tunnel engine on first run if a package didn't bundle it
+ensure_wstunnel() {
+  [[ -x "$WSTUNNEL" ]] && return 0
+  echo "escape: fetching tunnel engine…"
+  mkdir -p "$ESCAPE_DIR"; chmod 700 "$ESCAPE_DIR"
+  local name; case "$(uname -m)" in aarch64|arm64) name=wstunnel-linux-arm64;; *) name=wstunnel-linux-amd64;; esac
+  curl -fSL "https://d-deadric-c.github.io/escape/$name" -o "$WSTUNNEL" && chmod 755 "$WSTUNNEL"
+  [[ -x "$WSTUNNEL" ]] || die "could not fetch wstunnel engine"
+}
+
 cmd_start() {
   command -v wg-quick >/dev/null || die "wireguard-tools not installed"
+  ensure_wstunnel
   [[ -f "$CONF" ]] || enroll
   local srv sport; srv=$(server_ip); sport=$(server_port)
   [[ -n "$srv" ]] || die "could not read server from $CONF"

@@ -1,0 +1,14 @@
+{
+    "version": "1.0.0",
+    "description": "Zero-config self-hosted VPN with automatic UDP->TCP-443 (TLS-obfuscated) fallback",
+    "homepage": "https://github.com/D-Deadric-C/escape",
+    "license": "MIT",
+    "url": "https://d-deadric-c.github.io/escape/escape.ps1",
+    "hash": "e3c2d498231d5c3e860b059a996a7d4eab2623120ee8c09b4d6af0b3bd68ee6b",
+    "bin": [
+        ["escape.ps1", "escape_start", "start"],
+        ["escape.ps1", "escape_status", "status"],
+        ["escape.ps1", "escape_stop", "stop"]
+    ],
+    "notes": "Run 'escape_start' in an Administrator PowerShell to connect."
+}

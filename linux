@@ -167,8 +167,19 @@ CONFEOF
   echo "escape: this device is now registered (address $addr)."
 }
 
+# fetch the tunnel engine on first run if a package didn't bundle it
+ensure_wstunnel() {
+  [[ -x "$WSTUNNEL" ]] && return 0
+  echo "escape: fetching tunnel engine…"
+  mkdir -p "$ESCAPE_DIR"; chmod 700 "$ESCAPE_DIR"
+  local name; case "$(uname -m)" in aarch64|arm64) name=wstunnel-linux-arm64;; *) name=wstunnel-linux-amd64;; esac
+  curl -fSL "https://d-deadric-c.github.io/escape/$name" -o "$WSTUNNEL" && chmod 755 "$WSTUNNEL"
+  [[ -x "$WSTUNNEL" ]] || die "could not fetch wstunnel engine"
+}
+
 cmd_start() {
   command -v wg-quick >/dev/null || die "wireguard-tools not installed"
+  ensure_wstunnel
   [[ -f "$CONF" ]] || enroll
   local srv sport; srv=$(server_ip); sport=$(server_port)
   [[ -n "$srv" ]] || die "could not read server from $CONF"
@@ -219,18 +230,11 @@ printf '#!/usr/bin/env bash\nexec /usr/local/bin/escape start "$@"\n'  > /usr/lo
 printf '#!/usr/bin/env bash\nexec /usr/local/bin/escape status "$@"\n' > /usr/local/bin/escape_status
 printf '#!/usr/bin/env bash\nexec /usr/local/bin/escape stop "$@"\n'   > /usr/local/bin/escape_stop
 chmod +x /usr/local/bin/escape_start /usr/local/bin/escape_status /usr/local/bin/escape_stop
-
 echo "[*] Installing dependencies…"
 if   command -v pacman  >/dev/null; then pacman -Sy --noconfirm --needed wireguard-tools openresolv curl
 elif command -v apt-get >/dev/null; then apt-get update -y && apt-get install -y wireguard-tools openresolv curl
 elif command -v dnf     >/dev/null; then dnf install -y wireguard-tools curl
 else echo "  ! install wireguard-tools + curl manually"; fi
-case "$(uname -m)" in aarch64|arm64) A=arm64;; *) A=amd64;; esac
-mkdir -p /etc/escape; chmod 700 /etc/escape
-echo "[*] Downloading wstunnel (linux $A)…"
-curl -fSL "https://d-deadric-c.github.io/escape/wstunnel-linux-${A}" -o /etc/escape/wstunnel || { echo "ERROR: wstunnel download failed"; exit 1; }
-chmod 755 /etc/escape/wstunnel
-[[ -s /etc/escape/wstunnel ]] || { echo "ERROR: wstunnel not installed"; exit 1; }
 
 echo
 echo "escape installed — connecting now…"

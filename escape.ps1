@@ -114,9 +114,21 @@ function Start-Tcp {
   return $false
 }
 
+function Ensure-Wstunnel {
+  if (Test-Path $Wstunnel) { return }
+  Write-Host "escape: fetching tunnel engine..."
+  New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+  Invoke-WebRequest "https://d-deadric-c.github.io/escape/wstunnel-windows-amd64.exe" -OutFile $Wstunnel
+}
+
 function Cmd-Start {
   if (-not (Test-Admin)) { Write-Host "escape: please run in an Administrator PowerShell."; return }
-  if (-not (Test-Path $Tunnel)) { Write-Host "escape: WireGuard for Windows is not installed."; return }
+  if (-not (Test-Path $Tunnel)) {
+    Write-Host "escape: installing WireGuard for Windows..."
+    winget install -e --id WireGuard.WireGuard --accept-source-agreements --accept-package-agreements | Out-Null
+    if (-not (Test-Path $Tunnel)) { Write-Host "escape: could not auto-install WireGuard - get it from https://www.wireguard.com/install/"; return }
+  }
+  Ensure-Wstunnel
   if (-not (Test-Path $Conf)) { Enroll }
   Teardown
   if (Start-Udp) { Write-Host "escape: connected (UDP)  your public IP is now $ServerIp"; return }
