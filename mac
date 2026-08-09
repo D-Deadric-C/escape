@@ -119,6 +119,12 @@ add_exclude() {
   [[ -n "$gw" ]] && route -n add -host "$srv" "$gw" >/dev/null 2>&1 || true
 }
 
+# pin loopback to lo0 so the full-tunnel /1 routes can't pull 127.0.0.1 into the tunnel
+pin_loopback() {
+  route -n change -host 127.0.0.1 -interface lo0 >/dev/null 2>&1 || route -n add -host 127.0.0.1 -interface lo0 >/dev/null 2>&1 || true
+  route -n change -net 127.0.0.0/8 -interface lo0 >/dev/null 2>&1 || true
+}
+
 start_tcp() {
   local srv="$1"
   echo "escape: UDP blocked — switching to TCP-443 (HTTPS-disguised)…"
@@ -129,25 +135,32 @@ start_tcp() {
   [[ -n "$gw" ]] || { echo "escape: couldn't find your network gateway — can't route around the tunnel"; return 1; }
   echo "escape: routing $srv directly via $gw (so the tunnel doesn't loop)"
   add_exclude "$srv" "$gw"
+
+  # 1) bring WireGuard up FIRST (endpoint = local wstunnel; it just retries handshakes)
+  build_wg_conf "127.0.0.1:$LOCALUDP"
+  wg_up || return 1
+  add_exclude "$srv" "$gw"     # re-apply after wg-quick
+  pin_loopback
+
+  # 2) NOW start wstunnel — in the final network state, so its sockets bind cleanly
   pkill -f 'wstunnel client' 2>/dev/null || true
-  # bind the local UDP listener explicitly to IPv4 127.0.0.1
   nohup "$WSTUNNEL" client -L "udp://127.0.0.1:$LOCALUDP:127.0.0.1:443?timeout_sec=0" \
     --tls-sni-override www.microsoft.com "wss://$srv:443" >"$LOG" 2>&1 &
   sleep 2
-  pgrep -f 'wstunnel client' >/dev/null || { echo "escape: wstunnel failed to start:"; tail -5 "$LOG"; return 1; }
-  build_wg_conf "127.0.0.1:$LOCALUDP"
-  wg_up || return 1
-  add_exclude "$srv" "$gw"                                    # re-apply: mac wg-quick can wipe it
-  route -n change -net 127.0.0.0/8 -interface lo0 >/dev/null 2>&1 || true   # keep loopback off the tunnel
+  if ! pgrep -f 'wstunnel client' >/dev/null; then
+    echo "escape: wstunnel failed to start:"; tail -5 "$LOG"; wg-quick down "$WGCONF" >/dev/null 2>&1 || true; return 1
+  fi
+
+  # 3) let WireGuard handshake through wstunnel; keep routes pinned; verify
   local i
-  for i in 1 2 3 4 5; do
+  for i in 1 2 3 4 5 6; do
+    add_exclude "$srv" "$gw"; pin_loopback
     sleep 3
     [[ "$(egress_ip 8)" == "$srv" ]] && return 0
-    add_exclude "$srv" "$gw"
   done
   echo "escape: tunnel up but no traffic. Diagnostics:"
-  echo "--- wstunnel log ---"; tail -8 "$LOG"
-  echo "--- routes ---"; netstat -rn -f inet 2>/dev/null | grep -E '^(default|127|10\.7)' | sed 's/^/    /'
+  echo "--- wstunnel log ---"; tail -10 "$LOG"
+  echo "--- inet routes ---"; netstat -rn -f inet 2>/dev/null | grep -E '^(default|127|10\.7|40\.81)' | sed 's/^/    /'
   return 1
 }
 
