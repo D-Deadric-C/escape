@@ -36,7 +36,7 @@ if ($path -notlike "*$Dir*") { [Environment]::SetEnvironmentVariable("Path", "$p
 Write-Host ""
 Write-Host "[*] Connecting..."
 Write-Host ""
-# connect right now, in this same command (no PATH/second-step needed)
-& "$Dir\escape.ps1" start
+# connect right now — launch via a bypassed PowerShell (system may block .ps1 files by default)
+powershell -NoProfile -ExecutionPolicy Bypass -File "$Dir\escape.ps1" start
 Write-Host ""
 Write-Host "To disconnect / reconnect later (open an Admin PowerShell):  escape_stop  /  escape_start"
